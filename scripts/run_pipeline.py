@@ -524,6 +524,7 @@ CONFIGS: dict[str, dict[str, Any]] = {
         "slug": lambda r: _slug_col(r) or (r.get("name") or "").strip() or None,
         "csv": "ats-companies/bamboohr.csv",
         "output": "bamboohr/jobs.csv",
+        "fail_closed_on_empty": True,
     },
     "dayforce": {
         "scraper": DayforceScraper,
@@ -772,6 +773,7 @@ CONFIGS: dict[str, dict[str, Any]] = {
     "uber": {
         "scraper": UberScraper, "singleton": True,
         "output": "uber/jobs.csv",
+        "fail_closed_on_empty": True,
     },
     "bundesagentur": {
         # German federal employment agency — official, public, ~1M+ jobs.
@@ -779,6 +781,12 @@ CONFIGS: dict[str, dict[str, Any]] = {
         # (job category) to bypass the 10k pagination cap.
         "scraper": BundesagenturScraper, "singleton": True,
         "output": "bundesagentur/jobs.csv",
+        "fail_closed_on_empty": True,
+        # The listing API already provides the fields needed for the public
+        # index. Fetching ~1M individual detail pages would take days and put
+        # unnecessary load on the federal service; preserve cached bodies for
+        # existing rows and leave new descriptions for a separate backfill.
+        "skip_description_enrichment": True,
     },
     "arbetsformedlingen": {
         # Sweden's federal employment service — public JSON API. ~46k
@@ -855,9 +863,10 @@ CONFIGS: dict[str, dict[str, Any]] = {
         "output": "remoteok/jobs.csv",
     },
     "thehub": {
-        # The Hub — Nordic startups, ships lat/lon. ~1k live.
+        # The Hub — Nordic startups, ships lat/lon.
         "scraper": TheHubScraper, "singleton": True,
         "output": "thehub/jobs.csv",
+        "fail_closed_on_empty": True,
     },
     "wanted": {
         # Wanted — Korea + Japan tech roles. ~10k live.
@@ -1508,7 +1517,14 @@ async def run(ats: str, concurrency: int, max_tenants: int | None, timeout: floa
             # today — its ~2.7 M-row pan-EU catalog would peak at ~10 GB
             # RSS in legacy mode, exceeding the VPS RAM budget.
             if uses_streaming:
-                scraper = cfg["scraper"](ats, timeout=timeout)
+                skip_description_enrichment = bool(
+                    cfg.get("skip_description_enrichment")
+                )
+                scraper = cfg["scraper"](
+                    ats,
+                    timeout=timeout,
+                    include_descriptions=not skip_description_enrichment,
+                )
                 pending_descriptions: set[asyncio.Task[Job]] = set()
 
                 def write_streamed_job(job: Job) -> None:
@@ -1546,7 +1562,11 @@ async def run(ats: str, concurrency: int, max_tenants: int | None, timeout: floa
                 try:
                     async for job in scraper.fetch_stream():
                         cached = _cached_description(job, description_cache)
-                        if cached:
+                        if skip_description_enrichment:
+                            if cached:
+                                job.description = cached
+                            write_streamed_job(job)
+                        elif cached:
                             job.description = cached
                             write_streamed_job(job)
                         elif job.description:
