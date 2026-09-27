@@ -1,5 +1,6 @@
-from ats_scrapers.models import ATSType
 import argparse
+
+from ats_scrapers.models import ATSType
 
 def search():
     args = argparse.ArgumentParser()
